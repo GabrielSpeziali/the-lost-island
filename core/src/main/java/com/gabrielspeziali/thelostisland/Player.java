@@ -13,7 +13,7 @@ public class Player {
     public static final float WALK_SPEED = 150f;    // pixels/second
     public static final float RUN_SPEED = 280f;
     public static final float GRAVITY = -1000f;     // pixels/second², negative  bring down
-    public static final float JUMP_HEIGHT = 80f;    // jump height / pixels
+    public static final float JUMP_HEIGHT = 150f;    // jump height / pixels
     public static final float JUMP_VELOCITY =
         (float) Math.sqrt(2 * Math.abs(GRAVITY) * JUMP_HEIGHT);      // free fall formule
     public static final float JUMP_BUFFER_TIME = 0.20f; //seconds of tolerance
@@ -37,6 +37,9 @@ public class Player {
     private JumpPhase jumpPhase = JumpPhase.NONE;
     private float jumpPhaseTimer = 0f;
 
+    private static final float COYOTE_TIME = 0.10f;
+    private float coyoteTimer = 0f;
+
     private Array<TextureAtlas.AtlasRegion> jumpRightFrames, jumpLeftFrames;
 
     private boolean isDucking = false;
@@ -44,6 +47,14 @@ public class Player {
     private static final float DUCK_HEIGHT = 26f;
 
     public float height = STANDING_HEIGHT;
+
+    public static final int MAX_LIFE = 5;
+    public int currentLife = MAX_LIFE;
+
+    private static final float ATTACK_FRAME_TIME = 1 / 12f; // duration of each of the 4 frames
+    private boolean isAttacking = false;
+    private float attackTimer = 0f;
+    private Array<TextureAtlas.AtlasRegion> attackRightFrames, attackLeftFrames;
 
     // Animation
     private enum State {IDLE, WALK, RUN, JUMP, DUCK}
@@ -80,16 +91,18 @@ public class Player {
 
         jumpRightFrames = atlas.findRegions("player_jump_right"); // 6 frames, index 0-5
         jumpLeftFrames = atlas.findRegions("player_jump_left");
+        attackRightFrames = atlas.findRegions("player_attack_right"); // 4 frames, index 0-3
+        attackLeftFrames = atlas.findRegions("player_attack_left");
     }
 
     public Rectangle getBounds() {
         return new Rectangle(position.x, position.y, width, height);
     }
 
-    public void update(float delta, Array<Rectangle> solids) {
+    public void update(float delta, Array<Rectangle> solids, float mouseWorldX) {
         onGroundPrevFrame = onGround; // snapshot before physics this frame
 
-        handleInput();
+        handleInput(mouseWorldX);
 
         velocity.y += GRAVITY * delta;
 
@@ -115,13 +128,20 @@ public class Player {
             velocity.y = 0;
         }
 
+        if (onGround) {
+            coyoteTimer = COYOTE_TIME;
+        } else {
+            coyoteTimer -= delta;
+        }
+
         // Jump buffer: if the intention still "alive" and the player is on the ground, jump
         if (jumpBufferTimer > 0f) {
             jumpBufferTimer -= delta;
-            if (onGround) {
+            if (onGround || coyoteTimer > 0f) {
                 velocity.y = JUMP_VELOCITY;
                 onGround = false;
                 jumpBufferTimer = 0f;
+                coyoteTimer = 0f;   // consumed, prevents a second jump off the same "grace window"
                 jumpPhase = JumpPhase.TAKEOFF;
                 jumpPhaseTimer = JUMP_EDGE_HOLD;
             }
@@ -138,6 +158,14 @@ public class Player {
             jumpPhaseTimer -= delta;
             if (jumpPhaseTimer <= 0f) jumpPhase = JumpPhase.NONE;
         }
+
+        if (isAttacking) {
+            attackTimer += delta;
+            if (attackTimer >= attackRightFrames.size * ATTACK_FRAME_TIME) {
+                isAttacking = false;
+            }
+        }
+
         updateAnimationState(delta);
     }
 
@@ -173,6 +201,19 @@ public class Player {
             return facingRight ? jumpRightFrames.get(5) : jumpLeftFrames.get(5);
         }
 
+        // Duck always wins, even over an ongoing attack
+        if (currentState == State.DUCK) {
+            Animation<TextureRegion> duckAnim = facingRight ? duckRight : duckLeft;
+            return duckAnim.getKeyFrame(stateTime, false);
+        }
+
+        // Attack overrides jump and ground animations, but not duck (handled above)
+        if (isAttacking) {
+            Array<TextureAtlas.AtlasRegion> frames = facingRight ? attackRightFrames : attackLeftFrames;
+            int idx = Math.min((int) (attackTimer / ATTACK_FRAME_TIME), frames.size - 1);
+            return frames.get(idx);
+        }
+
         if (currentState == State.JUMP) {
             Array<TextureAtlas.AtlasRegion> frames = facingRight ? jumpRightFrames : jumpLeftFrames;
             if (velocity.y > 0) {
@@ -194,18 +235,14 @@ public class Player {
             case RUN:
                 anim = facingRight ? runRight : runLeft;
                 break;
-            case DUCK:
-                anim = facingRight ? duckRight : duckLeft;
-                break;
             default:
                 anim = facingRight ? idleRight : idleLeft;
                 break;
         }
-
-        boolean looping = currentState != State.DUCK;
-        return anim.getKeyFrame(stateTime, looping);
+        return anim.getKeyFrame(stateTime, true);
     }
-    private void handleInput() {
+
+    private void handleInput(float mouseWorldX) {
         isDucking = onGround && (Gdx.input.isKeyPressed(Input.Keys.S) || Gdx.input.isKeyPressed(Input.Keys.CONTROL_LEFT));
 
         boolean leftHeld = Gdx.input.isKeyPressed(Input.Keys.A);
@@ -241,6 +278,19 @@ public class Player {
         if (jumpPressed) {
             jumpBufferTimer = JUMP_BUFFER_TIME;   // keep the intention of jump
         }
+
+        // Attack: left mouse click. Duck takes priority — no attacking while crouched.
+        if (!isDucking && Gdx.input.isButtonJustPressed(Input.Buttons.LEFT)) {
+            float playerCenterX = position.x + width / 2f;
+            facingRight = mouseWorldX >= playerCenterX; // turn to face the mouse side, even mid-movement
+
+            isAttacking = true;
+            attackTimer = 0f;
+        }
+
+        if (Gdx.input.isKeyJustPressed(Input.Keys.K)) {
+            takeDamage(); // temporary: press K to test the life HUD
+        }
     }
 
     private boolean collidesAny(Rectangle bounds, Array<Rectangle> solids) {
@@ -248,6 +298,16 @@ public class Player {
             if (bounds.overlaps(r)) return true;
         }
         return false;
+    }
+
+    public void takeDamage() {
+        if (currentLife > 0) {
+            currentLife--;
+        }
+    }
+
+    public boolean isDead() {
+        return currentLife <= 0;
     }
 
     public void dispose() {

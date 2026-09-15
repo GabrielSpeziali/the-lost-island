@@ -10,5 +10,11 @@ public class TexturePackerRunner {
             "assets/sprites/player",
             "player"
         );
+
+        TexturePacker.process(
+            "assets/sprites/ui/raw_frames",
+            "assets/sprites/ui",
+            "life"
+        );
     }
 }
